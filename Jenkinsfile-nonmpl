@@ -1,0 +1,151 @@
+// Non-MPL pipeline with the same functionality
+
+// Configuration
+CFG = [
+  'agent_label': 'LS',
+  'docker.artifacts': 'target/petclinic.war',
+  'selenium.maven_profile': 'selenium-tests',
+  'selenium.target_url': 'http://target-host:8080/petclinic',
+]
+
+// Internal configuration
+INT = [:]
+
+pipeline {
+  agent {
+    label CFG.agent_label
+  }
+  options {
+    skipDefaultCheckout(true)
+  }
+  stages {
+    stage( 'Checkout' ) {
+      steps {
+        checkout scm
+      }
+    }
+    stage( 'Build' ) {
+      steps {
+        /**
+         * Simple Maven Build
+         */
+        withEnv(["PATH+MAVEN=${tool(CFG.'maven.tool_version' ?: 'Maven 3')}/bin"]) {
+          script {
+            def settings = CFG.'maven.settings_path' ? "-s '${CFG.'maven.settings_path'}'" : ''
+            sh """mvn -B ${settings} -DargLine='-Xmx1024m -XX:MaxPermSize=1024m' clean install"""
+          }
+        }
+
+        /**
+         * Simple Dockerfile build
+         */
+        script {
+          INT.'docker.deploy_image' = CFG.'docker.deploy_image' ?: env.NODE_NAME
+          INT.'docker.deploy_name' = CFG.'docker.deploy_name' ?: env.NODE_NAME
+        }
+        // Stash the artifacts to build image on master
+        stash name: 'docker_build',
+              includes: (['Dockerfile'] + CFG.'docker.artifacts' ?: []).join(',')
+
+        node('master') {
+          withEnv(["PATH+DOCKER=${tool(CFG.'docker.tool_version' ?: 'Docker')}/bin"]) {
+            // Unstash artifacts & build the docker image
+            unstash 'docker_build'
+            sh "docker build -t ${INT.'docker.deploy_image'} ."
+          }
+        }
+      }
+    }
+    stage( 'Deploy' ) {
+      agent { label 'master' }
+      steps {
+        /**
+         * Deploying the docker image locally
+         */
+        withEnv(["PATH+DOCKER=${tool(CFG.'docker.tool_version' ?: 'Docker')}/bin"]) {
+          // Run docker image as container
+          script {
+            INT.'docker.deploy_id' = sh(script: """docker run -d --name "${INT.'docker.deploy_name' ?: ''}" --stop-timeout ${CFG.'docker.timeout' ?: 3600} ${INT.'docker.deploy_image'}""", returnStdout: true).trim()
+          }
+        }
+      }
+    }
+    stage( 'Test' ) {
+      steps {
+        /**
+         * Deploy a simple selenium cluster via Docker
+         */
+        script {
+          INT.network_name = env.NODE_NAME
+          INT.container_id = env.DOCKER_CONTAINER_ID
+        }
+
+        node('master') {
+          withEnv(["PATH+DOCKER=${tool(CFG.'docker.tool_version' ?: 'Docker')}/bin"]) {
+            // Preparing private network & connect current jenkins slave
+            sh "docker network create '${INT.network_name}'"
+            sh "docker network connect --alias jenkins-slave '${INT.network_name}' '${INT.container_id}'"
+
+            // Run selenium hub
+            sh "docker run -d --name '${INT.network_name}-selenium-hub' --stop-timeout ${CFG.'selenium.timeout' ?: 3600} selenium/hub:3.11.0-dysprosium"
+            sh "docker network connect --alias selenium-hub '${INT.network_name}' '${INT.network_name}-selenium-hub'"
+
+            // Run selenium workers
+            script {
+              for( def i = 0; i < (CFG.'selenium.workers.firefox' ?: 1); i++ ) {
+                sh "docker run -d --name '${INT.network_name}-selenium-firefox-${i}' --network '${INT.network_name}' --stop-timeout ${CFG.'selenium.timeout' ?: 3600} -e HUB_HOST=selenium-hub -v /dev/shm:/dev/shm selenium/node-firefox:3.11.0-dysprosium"
+              }
+              for( def i = 0; i < (CFG.'selenium.workers.chrome' ?: 1); i++ ) {
+                sh "docker run -d --name '${INT.network_name}-selenium-chrome-${i}' --network '${INT.network_name}' --stop-timeout ${CFG.'selenium.timeout' ?: 3600} -e HUB_HOST=selenium-hub -v /dev/shm:/dev/shm selenium/node-chrome:3.11.0-dysprosium"
+              }
+            }
+          }
+        }
+
+        node('master') {
+          withEnv(["PATH+DOCKER=${tool(CFG.'docker.tool_version' ?: 'Docker')}/bin"]) {
+            // Connected deployed application container to the network
+            // TODO: Looks like not a good idea - find a way to manage private network over pipeline
+            sh """docker network connect --alias target-host '${INT.network_name}' "${INT.'docker.deploy_name'}" """
+          }
+        }
+
+        /**
+         * Running selenium tests using maven
+         */
+        withEnv(["PATH+MAVEN=${tool(CFG.'maven.tool_version' ?: 'Maven 3')}/bin"]) {
+          script {
+            def settings = CFG.'maven.settings_path' ? "-s '${CFG.'maven.settings_path'}'" : ''
+            sh """mvn -B ${settings} -DargLine='-Xmx1024m -XX:MaxPermSize=1024m' verify -P ${CFG.'selenium.maven_profile'} -DargLine=" """+
+              " -Dtest.selenium.hub.url=${CFG.'selenium.hub_url' ?: 'http://selenium-hub:4444/wd/hub'}"+
+              " -Dtest.target.server.url=${CFG.'selenium.target_url' ?: 'http://target-host:8080'}"+
+              ' -Dtest.run.htmlunit=true'+
+              ' -Dtest.run.ie=false'+
+              ' -Dtest.run.firefox=true'+
+              ' -Dtest.run.chrome=true'+
+              ' -Dtest.run.opera=false"'
+          }
+        }
+      }
+    }
+  }
+  post {
+    always {
+      junit 'target/failsafe-reports/*.xml'
+      junit 'target/surefire-reports/*.xml'
+      script {
+        node('master') {
+          withEnv(["PATH+DOCKER=${tool(CFG.'docker.tool_version' ?: 'Docker')}/bin"]) {
+            // Disconnecting jenkins slave form the network & destroying all the containers in the network
+            sh "docker network disconnect '${INT.network_name}' '${INT.container_id}'"
+            sh "for i in \$(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' '${INT.network_name}'); do docker rm -f \$i; done"
+            sh "docker network rm '${INT.network_name}'"
+
+            // Remove the created docker image
+            sh "docker rmi -f '${INT.'docker.deploy_image'}'"
+          }
+        }
+      }
+    }
+  }
+}
