@@ -2,7 +2,7 @@
 @Library('mpl@release') _
 
 MPLPipeline {
-  agent_label = 'DockerAgent'
+  agent_label = 'Docker Agent'
   docker = [
     artifacts: 'target/petclinic.war',
     deploy_name: "target-${new Random().nextInt()}"
