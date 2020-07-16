@@ -8,7 +8,8 @@ MPLPostStep('always') {
   node('master') {
     withEnv(["PATH+DOCKER=${tool(CFG.'docker.tool_version' ?: 'Docker')}/bin"]) {
       // Destroying the deployed container
-      sh "docker rm -f '${CFG.'docker.deploy_id'}'"
+      //sh "docker rm -f '${CFG.'docker.deploy_id'}'"
+      echo "Docker Post Deploy Step Called"
     }
   }
 }
