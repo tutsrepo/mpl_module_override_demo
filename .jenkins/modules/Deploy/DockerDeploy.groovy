@@ -15,8 +15,9 @@ MPLPostStep('always') {
 }
 
 node('master') {
-  withEnv(["PATH+DOCKER=${tool(CFG.'docker.tool_version' ?: 'Docker')}/bin"]) {
+//  withEnv(["PATH+DOCKER=${tool(CFG.'docker.tool_version' ?: 'Docker')}/bin"]) {
     // Run docker image as container
-    CFG.'docker.deploy_id' = sh(script: """docker run -d --name "${CFG.'docker.deploy_name' ?: ''}" --stop-timeout ${CFG.'docker.timeout' ?: 3600} ${CFG.'docker.deploy_image'}""", returnStdout: true).trim()
-  }
+//    CFG.'docker.deploy_id' = sh(script: """docker run -d --name "${CFG.'docker.deploy_name' ?: ''}" --stop-timeout ${CFG.'docker.timeout' ?: 3600} ${CFG.'docker.deploy_image'}""", returnStdout: true).trim()
+//  }
+  echo "Runn Docker image as container"
 }
